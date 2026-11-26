@@ -117,6 +117,27 @@ is still in the client bundle, so someone who knows the Supabase project
 URL + anon key could still reach the database directly. For true per-user
 security, use Supabase Auth + RLS instead.
 
+## Photo library (P1)
+
+The **Photos** tab is a general photo pool for shoot days. Bulk-upload a
+batch of photos there — they are stored in Supabase Storage under the
+`library/` folder and listed in a `library_photos` table — then, when you
+add or edit an item, tap **Pick from library** and choose the photos for it.
+Photos already used on an item are marked **Used** (the tab also shows how
+many are still unused). Photos are resized to a max of 1600px before upload
+so a big shoot does not eat your 1 GB of free Supabase storage.
+
+**One-time setup if you deployed before P1:** re-run `supabase/schema.sql`
+in the Supabase SQL Editor (paste the whole file and Run — it is safe to
+run twice; it only adds the `library_photos` table). Until you do, the
+Photos tab will say the table is missing.
+
+Item photos can also be reordered in the add/edit form (‹ › buttons, ★ to
+make one the first/hero photo), and the item detail photo now shows the
+whole image instead of cropping it. New category: **Watches & Jewellery**.
+Saving an item with a $0 asking price now asks first, and the goal line
+reads "target pace $962 / week".
+
 ## 5) Add your first item
 
 1. Open your deployed site and click **+ Add item**.

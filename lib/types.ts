@@ -4,6 +4,7 @@ export type Category =
   | "80s/90s Books"
   | "Pokémon Cards"
   | "Tazos/Pogs"
+  | "Watches & Jewellery"
   | "Other Vintage";
 
 export const CATEGORIES: Category[] = [
@@ -12,6 +13,7 @@ export const CATEGORIES: Category[] = [
   "80s/90s Books",
   "Pokémon Cards",
   "Tazos/Pogs",
+  "Watches & Jewellery",
   "Other Vintage",
 ];
 
@@ -130,6 +132,22 @@ export function realisedProfit(item: Item): number {
 /** Money you would make if it sold at the asking price. */
 export function potentialProfit(item: Item): number {
   return (item.askingPrice || 0) - (item.cost || 0) - (item.postage || 0) - (item.fees || 0);
+}
+
+/** A photo in the general library — uploaded in bulk, not yet attached to an item. */
+export interface LibraryPhoto {
+  id: string;
+  url: string;
+  /** Storage path inside the item-photos bucket (empty for demo-mode data URLs). */
+  path: string;
+  createdAt: string;
+}
+
+export function newLibraryId(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+  return `lib-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 }
 
 export function aud(n: number): string {

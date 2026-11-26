@@ -19,11 +19,12 @@ export const PHOTOS_BUCKET = "item-photos";
 export async function uploadPhotoToSupabase(
   itemId: string,
   file: File,
-): Promise<string | null> {
+  folder?: string,
+): Promise<{ url: string; path: string } | null> {
   const supabase = getSupabase();
   if (!supabase) return null;
   const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
-  const path = `${itemId}/${Date.now()}-${safeName}`;
+  const path = folder ? `${folder}/${Date.now()}-${safeName}` : `${itemId}/${Date.now()}-${safeName}`;
   const { error } = await supabase.storage
     .from(PHOTOS_BUCKET)
     .upload(path, file, { upsert: false });
@@ -32,5 +33,17 @@ export async function uploadPhotoToSupabase(
     return null;
   }
   const { data } = supabase.storage.from(PHOTOS_BUCKET).getPublicUrl(path);
-  return data.publicUrl;
+  return { url: data.publicUrl, path };
+}
+
+/** Delete a file from Supabase Storage by path. Best-effort — returns false on failure. */
+export async function deletePhotoFromSupabase(path: string): Promise<boolean> {
+  const supabase = getSupabase();
+  if (!supabase || !path) return false;
+  const { error } = await supabase.storage.from(PHOTOS_BUCKET).remove([path]);
+  if (error) {
+    console.error("Photo delete failed:", error.message);
+    return false;
+  }
+  return true;
 }

@@ -58,6 +58,32 @@ insert into storage.buckets (id, name, public)
 values ('item-photos', 'item-photos', true)
 on conflict (id) do nothing;
 
+-- Photo library (P1, Nov 2026): bulk-uploaded photos that live in a general
+-- folder and are picked into items later. Library photos are stored in the
+-- same item-photos bucket under the "library/" prefix; this table is the
+-- list the app shows. Re-run this whole file to add the table to an
+-- existing project — it is safe to run twice.
+create table if not exists public.library_photos (
+  id uuid primary key default gen_random_uuid(),
+  url text not null default '',
+  path text not null default '',
+  created_at timestamptz not null default now()
+);
+
+alter table public.library_photos enable row level security;
+
+drop policy if exists "Allow all for anon" on public.library_photos;
+create policy "Allow all for anon"
+  on public.library_photos
+  for all
+  to anon
+  using (true)
+  with check (true);
+
+grant select, insert, update, delete on public.library_photos to anon;
+grant select, insert, update, delete on public.library_photos to authenticated;
+grant all on public.library_photos to service_role;
+
 -- Public read + anon upload/delete for the item-photos bucket.
 drop policy if exists "Public read item-photos" on storage.objects;
 create policy "Public read item-photos"

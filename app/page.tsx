@@ -13,19 +13,23 @@ import {
   emptyPlatforms,
   isStale,
   newItemId,
+  newLibraryId,
   potentialProfit,
   realisedProfit,
   type Category,
   type Item,
   type ItemStatus,
+  type LibraryPhoto,
   type PlatformInfo,
   type PlatformName,
   type PlatformStatus,
 } from "../lib/types";
-import { getSupabase, isSupabaseConfigured, uploadPhotoToSupabase } from "../lib/supabase";
+import { deletePhotoFromSupabase, getSupabase, isSupabaseConfigured, uploadPhotoToSupabase } from "../lib/supabase";
+import { resizeImageFile } from "../lib/images";
 import { platformDescription, platformHint } from "../lib/platformCopy";
 
 const LOCAL_KEY = "nice-find-items-v1";
+const LOCAL_LIBRARY_KEY = "nice-find-library-v1";
 const GOAL = 50000;
 const WEEKLY_PACE = 962;
 
@@ -204,7 +208,11 @@ export default function Home() {
   const [chip, setChip] = useState<Chip>("all");
   const [catFilter, setCatFilter] = useState("All");
   const [sort, setSort] = useState("newest");
-  const [tab, setTab] = useState<"stock" | "overview">("stock");
+  const [tab, setTab] = useState<"stock" | "photos" | "overview">("stock");
+  const [library, setLibrary] = useState<LibraryPhoto[]>([]);
+  const [libraryMissing, setLibraryMissing] = useState(false);
+  const [uploadingLibrary, setUploadingLibrary] = useState(false);
+  const [showLibraryPicker, setShowLibraryPicker] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [activePlatform, setActivePlatform] = useState<PlatformName>("eBay");
   const [showForm, setShowForm] = useState(false);
@@ -229,10 +237,28 @@ export default function Home() {
         } else {
           setItems((data || []).map((r) => fromRow(r as Record<string, unknown>)));
         }
+        // Photo library lives in its own table (added in P1). If it is not
+        // there yet, the schema has not been re-run — say so in the Photos tab.
+        const { data: lib, error: libErr } = await supabase
+          .from("library_photos")
+          .select("*")
+          .order("created_at", { ascending: false });
+        if (libErr) {
+          setLibraryMissing(true);
+        } else {
+          setLibrary((lib || []).map((r) => ({
+            id: String((r as Record<string, unknown>).id ?? newLibraryId()),
+            url: String((r as Record<string, unknown>).url ?? ""),
+            path: String((r as Record<string, unknown>).path ?? ""),
+            createdAt: String((r as Record<string, unknown>).created_at ?? new Date().toISOString()),
+          })));
+        }
       } else {
         try {
           const raw = localStorage.getItem(LOCAL_KEY);
           if (raw) setItems(JSON.parse(raw) as Item[]);
+          const rawLib = localStorage.getItem(LOCAL_LIBRARY_KEY);
+          if (rawLib) setLibrary(JSON.parse(rawLib) as LibraryPhoto[]);
         } catch {
           setItems([]);
         }
@@ -251,6 +277,23 @@ export default function Home() {
       // localStorage full (large photos) — the app still works in memory.
     }
   }, [items, loaded]);
+
+  // Local demo mode: persist the photo library too.
+  useEffect(() => {
+    if (!loaded || isSupabaseConfigured) return;
+    try {
+      localStorage.setItem(LOCAL_LIBRARY_KEY, JSON.stringify(library));
+    } catch {
+      // localStorage full — the library still works in memory.
+    }
+  }, [library, loaded]);
+
+  // URLs already attached to an item, so the library can mark them "Used".
+  const usedPhotoUrls = useMemo(
+    () => new Set(items.flatMap((i) => i.photos)),
+    [items],
+  );
+  const unusedLibraryCount = library.filter((p) => !usedPhotoUrls.has(p.url)).length;
 
   const dashboard = useMemo(() => {
     const unsold = items.filter((i) => i.status !== "Sold");
@@ -324,6 +367,10 @@ export default function Home() {
       setError("Give the item a title first.");
       return;
     }
+    // A $0 asking price is almost always a forgotten field, not a free item.
+    if (draft.askingPrice === 0 && draft.status !== "Sold" && !window.confirm("Asking price is $0 — save it like that?")) {
+      return;
+    }
     setError("");
     const today = new Date().toISOString().slice(0, 10);
     const toSave: Item = {
@@ -384,20 +431,96 @@ export default function Home() {
     setUploading(true);
     const urls: string[] = [];
     for (const file of Array.from(files)) {
+      const resized = await resizeImageFile(file);
       if (isSupabaseConfigured) {
-        const url = await uploadPhotoToSupabase(draft.id, file);
-        if (url) urls.push(url);
+        const uploaded = await uploadPhotoToSupabase(draft.id, resized);
+        if (uploaded) urls.push(uploaded.url);
       } else {
         const dataUrl = await new Promise<string>((resolve) => {
           const reader = new FileReader();
           reader.onload = () => resolve(String(reader.result));
-          reader.readAsDataURL(file);
+          reader.readAsDataURL(resized);
         });
         urls.push(dataUrl);
       }
     }
     if (urls.length > 0) setDraft((d) => ({ ...d, photos: [...d.photos, ...urls] }));
     setUploading(false);
+  }
+
+  /** Move one of the draft's photos left/right, or to the front (the hero). */
+  function moveDraftPhoto(index: number, dir: -1 | 1 | "first") {
+    setDraft((d) => {
+      const photos = [...d.photos];
+      if (dir === "first") {
+        const [p] = photos.splice(index, 1);
+        photos.unshift(p);
+      } else {
+        const target = index + dir;
+        if (target < 0 || target >= photos.length) return d;
+        [photos[index], photos[target]] = [photos[target], photos[index]];
+      }
+      return { ...d, photos };
+    });
+  }
+
+  /** Bulk-upload photos into the general library (not attached to any item yet). */
+  async function handleLibraryFiles(files: FileList | null) {
+    if (!files || files.length === 0) return;
+    if (isSupabaseConfigured && libraryMissing) {
+      setError("Photo library table not found — re-run supabase/schema.sql in Supabase (SQL Editor), then reload.");
+      return;
+    }
+    setUploadingLibrary(true);
+    const added: LibraryPhoto[] = [];
+    for (const file of Array.from(files)) {
+      const resized = await resizeImageFile(file);
+      if (isSupabaseConfigured) {
+        const uploaded = await uploadPhotoToSupabase("library", resized, "library");
+        if (!uploaded) continue;
+        const supabase = getSupabase();
+        const id = newLibraryId();
+        const { error: err } = await supabase!.from("library_photos").insert({
+          id,
+          url: uploaded.url,
+          path: uploaded.path,
+          created_at: new Date().toISOString(),
+        });
+        if (err) {
+          setError(`Could not save library photo: ${err.message}`);
+          continue;
+        }
+        added.push({ id, url: uploaded.url, path: uploaded.path, createdAt: new Date().toISOString() });
+      } else {
+        const dataUrl = await new Promise<string>((resolve) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result));
+          reader.readAsDataURL(resized);
+        });
+        added.push({ id: newLibraryId(), url: dataUrl, path: "", createdAt: new Date().toISOString() });
+      }
+    }
+    if (added.length > 0) setLibrary((prev) => [...added, ...prev]);
+    setUploadingLibrary(false);
+  }
+
+  /** Remove a photo from the library. If an item already uses it, only the
+   * library entry is removed — the file stays so the item keeps its photo. */
+  async function deleteLibraryPhoto(photo: LibraryPhoto) {
+    const used = usedPhotoUrls.has(photo.url);
+    if (!window.confirm(used
+      ? "This photo is used on an item. Remove it from the library? The item keeps its copy."
+      : "Remove this photo from the library?")) return;
+    const supabase = getSupabase();
+    if (supabase) {
+      if (!used && photo.path) await deletePhotoFromSupabase(photo.path);
+      const { error: err } = await supabase.from("library_photos").delete().eq("id", photo.id);
+      if (err) {
+        setError(`Could not delete library photo: ${err.message}`);
+        return;
+      }
+    }
+    setLibrary((prev) => prev.filter((p) => p.id !== photo.id));
   }
 
   async function loadSamples() {
@@ -479,9 +602,13 @@ export default function Home() {
   return (
     <main className="wrap">
       <header className="top">
-        <div>
-          <h1>nice find</h1>
-          <p className="sub">Vintage collectables · Adelaide · eBay · Facebook Marketplace · Depop</p>
+        <div className="brand">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src="/nice-find-logo.jpg" alt="Nice Find logo" className="logo" />
+          <div>
+            <h1>nice find</h1>
+            <p className="sub">Vintage collectables · Adelaide · eBay · Facebook Marketplace · Depop</p>
+          </div>
         </div>
         <button className="btn primary" onClick={openAdd}>+ Add item</button>
       </header>
@@ -489,12 +616,13 @@ export default function Home() {
       <div className="goal-line">
         <strong>{aud(dashboard.totalSold)} sold</strong>
         <span>of $50,000 · {progressPct.toFixed(1)}% · {aud(GOAL - dashboard.totalSold)} to go</span>
-        <span>· pace {aud(WEEKLY_PACE)} / week</span>
+        <span>· target pace {aud(WEEKLY_PACE)} / week</span>
       </div>
       <div className="progress"><div style={{ width: `${progressPct}%` }} /></div>
 
       <div className="tabs" role="tablist" aria-label="Sections">
         <button className={tab === "stock" && !selected ? "active" : ""} onClick={() => { setTab("stock"); setSelectedId(null); }}>Stock</button>
+        <button className={tab === "photos" && !selected ? "active" : ""} onClick={() => { setTab("photos"); setSelectedId(null); }}>Photos{unusedLibraryCount > 0 ? ` (${unusedLibraryCount})` : ""}</button>
         <button className={tab === "overview" ? "active" : ""} onClick={() => { setTab("overview"); setSelectedId(null); }}>Overview</button>
       </div>
 
@@ -519,13 +647,54 @@ export default function Home() {
           <label>Photos</label>
           <input type="file" accept="image/*" multiple onChange={(e) => handlePhotoFiles(e.target.files)} />
           {uploading && <p>Uploading photos…</p>}
+          {library.length > 0 && (
+            <div className="row" style={{ marginTop: 8 }}>
+              <button className="btn small" onClick={() => setShowLibraryPicker((v) => !v)}>
+                {showLibraryPicker ? "Hide library" : `Pick from library (${unusedLibraryCount} unused)`}
+              </button>
+            </div>
+          )}
+          {showLibraryPicker && (
+            <div className="lib-grid" style={{ marginTop: 8 }}>
+              {library.map((p) => {
+                const inDraft = draft.photos.includes(p.url);
+                const used = usedPhotoUrls.has(p.url);
+                return (
+                  <button
+                    key={p.id}
+                    type="button"
+                    className={`lib-thumb${inDraft ? " picked" : ""}`}
+                    onClick={() => {
+                      if (inDraft) {
+                        setDraft({ ...draft, photos: draft.photos.filter((u) => u !== p.url) });
+                      } else {
+                        setDraft({ ...draft, photos: [...draft.photos, p.url] });
+                      }
+                    }}
+                    title={inDraft ? "Tap to remove from this item" : used ? "Already used on an item — tap to add anyway" : "Tap to add to this item"}
+                  >
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={p.url} alt="Library photo" />
+                    {inDraft && <span className="lib-badge picked-badge">✓ Added</span>}
+                    {!inDraft && used && <span className="lib-badge">Used</span>}
+                  </button>
+                );
+              })}
+            </div>
+          )}
           {draft.photos.length > 0 && (
             <div className="photos" style={{ marginTop: 8 }}>
               {draft.photos.map((p, i) => (
                 <span key={i} style={{ position: "relative" }}>
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img src={p} alt={`Photo ${i + 1}`} />
+                  {i === 0 && <span className="lib-badge picked-badge" style={{ top: 2, left: 2, right: "auto" }}>First</span>}
                   <button className="btn small danger" style={{ position: "absolute", top: 2, right: 2 }} onClick={() => setDraft({ ...draft, photos: draft.photos.filter((_, j) => j !== i) })}>✕</button>
+                  <span style={{ position: "absolute", bottom: 2, left: 2, display: "flex", gap: 2 }}>
+                    <button className="btn small" style={{ padding: "2px 6px" }} disabled={i === 0} onClick={() => moveDraftPhoto(i, -1)} title="Move earlier">‹</button>
+                    <button className="btn small" style={{ padding: "2px 6px" }} disabled={i === draft.photos.length - 1} onClick={() => moveDraftPhoto(i, 1)} title="Move later">›</button>
+                    {i !== 0 && <button className="btn small" style={{ padding: "2px 6px" }} onClick={() => moveDraftPhoto(i, "first")} title="Make first photo">★</button>}
+                  </span>
                 </span>
               ))}
             </div>
@@ -634,7 +803,7 @@ export default function Home() {
             <div className="photos" style={{ marginTop: 12 }}>
               {selected.photos.map((p, i) => (
                 // eslint-disable-next-line @next/next/no-img-element
-                <img key={i} src={p} alt={`${selected.title} photo ${i + 1}`} className={i === 0 ? "hero" : ""} />
+                <img key={i} src={p} alt={`${selected.title} photo ${i + 1}`} className={i === 0 ? "hero detail-hero" : ""} />
               ))}
             </div>
           )}
@@ -729,7 +898,7 @@ export default function Home() {
             <div className="stat"><div className="k">Stock cost</div><div className="v">{aud(dashboard.totalStockCost)}</div><div className="s">cost of unsold stock</div></div>
             <div className="stat"><div className="k">Listed value</div><div className="v">{aud(dashboard.totalListedValue)}</div><div className="s">asking price of listed items</div></div>
             <div className="stat"><div className="k">Total sold</div><div className="v">{aud(dashboard.totalSold)}</div><div className="s">{dashboard.soldCount} item{dashboard.soldCount === 1 ? "" : "s"} sold</div></div>
-            <div className="stat"><div className="k">Sold this week</div><div className="v">{aud(dashboard.soldThisWeek)}</div><div className="s">pace: {aud(WEEKLY_PACE)} / week</div></div>
+            <div className="stat"><div className="k">Sold this week</div><div className="v">{aud(dashboard.soldThisWeek)}</div><div className="s">target pace: {aud(WEEKLY_PACE)} / week</div></div>
             <div className="stat"><div className="k">Profit so far</div><div className="v">{aud(dashboard.profit)}</div><div className="s">sold price − cost − postage − fees</div></div>
             <div className="stat">
               <div className="k">Goal: $50,000</div>
@@ -750,6 +919,44 @@ export default function Home() {
           </button>
           <div className="row" style={{ marginTop: 16 }}>
             <button className="btn" onClick={exportCsv} disabled={items.length === 0}>Export CSV</button>
+          </div>
+        </section>
+      ) : tab === "photos" ? (
+        <section>
+          <h2>Photo library</h2>
+          <p className="meta">
+            Bulk-upload your shoot photos here, then pick them when you add each item — no typing on shoot day.
+            Photos are resized to a max of 1600px before upload so they stay light.
+          </p>
+          {libraryMissing && (
+            <div className="banner error">
+              The photo library table is not in Supabase yet. Re-run <code>supabase/schema.sql</code> in the
+              Supabase SQL Editor, then reload this page.
+            </div>
+          )}
+          <label>Upload photos</label>
+          <input type="file" accept="image/*" multiple onChange={(e) => { handleLibraryFiles(e.target.files); e.target.value = ""; }} />
+          {uploadingLibrary && <p>Uploading photos…</p>}
+          <p className="meta" style={{ marginTop: 12 }}>
+            {library.length} photo{library.length === 1 ? "" : "s"} in the library · {unusedLibraryCount} not yet used on an item
+          </p>
+          {loaded && library.length === 0 && !uploadingLibrary && (
+            <div className="empty">
+              <p>No photos in the library yet. Upload a batch above — for example, everything from tomorrow&apos;s shoot.</p>
+            </div>
+          )}
+          <div className="lib-grid">
+            {library.map((p) => {
+              const used = usedPhotoUrls.has(p.url);
+              return (
+                <span key={p.id} className="lib-thumb" style={{ cursor: "default" }}>
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src={p.url} alt="Library photo" />
+                  {used && <span className="lib-badge">Used</span>}
+                  <button className="btn small danger lib-delete" onClick={() => deleteLibraryPhoto(p)} title="Remove from library">✕</button>
+                </span>
+              );
+            })}
           </div>
         </section>
       ) : (
@@ -824,15 +1031,12 @@ export default function Home() {
               );
             })}
           </div>
-          {loaded && items.length > 0 && (
-            <button className="btn primary add-sticky" onClick={openAdd}>+ Add item</button>
-          )}
         </section>
       )}
 
       <footer>
         <p>
-          Nice Find inventory · Goal: sell $50,000 of stock ({aud(WEEKLY_PACE)} a week).
+          Nice Find inventory · Goal: sell $50,000 of stock (target pace {aud(WEEKLY_PACE)} a week).
           This app does <strong>not</strong> auto-post to eBay, Facebook Marketplace or Depop — copy the generated
           description into each platform and tick the status off here.
           {" "}<a href="/api/logout">Lock app</a>

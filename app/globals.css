@@ -18,7 +18,9 @@ label { display: block; font-size: 13px; font-weight: 600; color: var(--muted); 
 textarea { min-height: 90px; resize: vertical; }
 
 .wrap { max-width: 1080px; margin: 0 auto; padding: 16px 16px 96px; }
-header.top { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; justify-content: space-between; }
+header.top { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; }
+.brand { display: flex; gap: 12px; align-items: center; }
+.logo { width: 56px; height: 56px; border-radius: 50%; object-fit: cover; flex: 0 0 auto; }
 h1 { font-size: 26px; margin: 6px 0 2px; }
 .sub { color: var(--muted); margin: 0 0 12px; font-size: 14px; }
 
@@ -79,6 +81,17 @@ h1 { font-size: 26px; margin: 6px 0 2px; }
 .photos { display: flex; gap: 6px; flex-wrap: wrap; }
 .photos img { width: 84px; height: 84px; object-fit: cover; border-radius: 8px; border: 1px solid var(--line); }
 .photos img.hero { width: 100%; height: 260px; object-fit: cover; }
+/* Detail view: show the whole photo instead of cropping it (a 260px cover crop cut the watch dial off). */
+.photos img.detail-hero { object-fit: contain; height: auto; max-height: 420px; background: var(--surface-muted); }
+
+/* Photo library grid */
+.lib-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 10px; margin-top: 12px; }
+.lib-thumb { position: relative; display: block; padding: 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: #fff; cursor: pointer; }
+.lib-thumb img { display: block; width: 100%; aspect-ratio: 1; object-fit: cover; }
+.lib-thumb.picked { outline: 3px solid var(--accent); outline-offset: -3px; }
+.lib-badge { position: absolute; top: 4px; right: 4px; font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 99px; background: #000; color: #fff; }
+.lib-badge.picked-badge { background: var(--accent); }
+.lib-delete { position: absolute; bottom: 4px; right: 4px; padding: 2px 8px; }
 .pill { display: inline-block; font-size: 12px; font-weight: 700; padding: 3px 10px; border-radius: 99px; background: var(--surface-muted); margin-right: 6px; color: var(--ink); }
 .pill.sold { background: var(--accent); color: #fff; }
 .pill.stale { background: #fff3cd; color: #7a5b00; }
