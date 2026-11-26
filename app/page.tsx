@@ -147,6 +147,23 @@ function toRow(item: Item): Record<string, unknown> {
   };
 }
 
+// Today's date in local YYYY-MM-DD, for defaulting a sold date.
+function todayLocal(): string {
+  const d = new Date();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${d.getFullYear()}-${m}-${day}`;
+}
+
+// One display label per stage, used everywhere (chips, Overview, dropdown, cards).
+const STATUS_LABELS: Record<ItemStatus, string> = {
+  "To photograph": "Needs photo",
+  "To list": "Ready to list",
+  Listed: "Listed",
+  Sold: "Sold",
+  Watching: "Watching",
+};
+
 function csvCell(v: string | number): string {
   const s = String(v ?? "");
   return `"${s.replace(/"/g, '""')}"`;
@@ -173,10 +190,10 @@ type Chip = "all" | "needs-photo" | "to-list" | "listed" | "sold" | "stale";
 const CHIPS: { id: Chip; label: string }[] = [
   { id: "all", label: "All" },
   { id: "needs-photo", label: "Needs photo" },
-  { id: "to-list", label: "To list" },
+  { id: "to-list", label: "Ready to list" },
   { id: "listed", label: "Listed" },
   { id: "sold", label: "Sold" },
-  { id: "stale", label: "Stale" },
+  { id: "stale", label: "Stale (30+ days)" },
 ];
 
 export default function Home() {
@@ -308,7 +325,14 @@ export default function Home() {
       return;
     }
     setError("");
-    const ok = await saveItem({ ...draft, title: draft.title.trim() });
+    const today = new Date().toISOString().slice(0, 10);
+    const toSave: Item = {
+      ...draft,
+      title: draft.title.trim(),
+      // Marking an item Sold without a sold date used to make "Sold this week" read $0.
+      soldDate: draft.status === "Sold" && !draft.soldDate ? today : draft.soldDate,
+    };
+    const ok = await saveItem(toSave);
     if (ok) {
       setShowForm(false);
       setEditingId(null);
@@ -350,7 +374,7 @@ export default function Home() {
   }
 
   async function markAsSold(item: Item) {
-    const next: Item = { ...item, status: "Sold", soldPrice: item.soldPrice || item.askingPrice };
+    const next: Item = { ...item, status: "Sold", soldPrice: item.soldPrice || item.askingPrice, soldDate: item.soldDate || todayLocal() };
     const ok = await saveItem(next);
     if (ok) setSelectedId(item.id);
   }
@@ -539,8 +563,12 @@ export default function Home() {
             <input value={draft.pickupLocation} onChange={(e) => setDraft({ ...draft, pickupLocation: e.target.value })} placeholder="e.g. Modbury Heights, Adelaide" />
             <label>Price / comp notes</label>
             <textarea value={draft.priceNotes} onChange={(e) => setDraft({ ...draft, priceNotes: e.target.value })} placeholder="Sold comps, resale estimates, what to check…" />
-            <h3>Platform listings</h3>
-            {PLATFORM_NAMES.map((p) => (
+            {draft.status === "Sold" ? (
+              <p className="meta">Sold — platform listings are hidden for sold items. Change the overall status back to Listed to edit them.</p>
+            ) : (
+              <>
+              <h3>Platform listings</h3>
+              {PLATFORM_NAMES.map((p) => (
               <div className="platform" key={p}>
                 <h4>{p === "Marketplace" ? "Facebook Marketplace" : p}</h4>
                 <div className="fields">
@@ -559,13 +587,18 @@ export default function Home() {
                 <input value={draft.platforms[p].url} onChange={(e) => setDraft({ ...draft, platforms: { ...draft.platforms, [p]: { ...draft.platforms[p], url: e.target.value } } })} placeholder="https://…" />
               </div>
             ))}
+              </>
+            )}
           </details>
 
           <details open={showSell} onToggle={(e) => setShowSell((e.target as HTMLDetailsElement).open)}>
             <summary>When it sells</summary>
             <label>Overall status</label>
-            <select value={draft.status} onChange={(e) => setDraft({ ...draft, status: e.target.value as ItemStatus })}>
-              {ITEM_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
+            <select value={draft.status} onChange={(e) => {
+              const nextStatus = e.target.value as ItemStatus;
+              setDraft({ ...draft, status: nextStatus, soldDate: nextStatus === "Sold" && !draft.soldDate ? todayLocal() : draft.soldDate });
+            }}>
+              {ITEM_STATUSES.map((s) => <option key={s} value={s}>{STATUS_LABELS[s]}</option>)}
             </select>
             <div className="cols">
               <div>
@@ -620,16 +653,36 @@ export default function Home() {
           {selected.completeness && <p className="meta">Completeness: {selected.completeness}</p>}
           {selected.priceNotes && <p className="meta">Notes: {selected.priceNotes}</p>}
 
-          <h3>Sell it</h3>
-          <div className="plat-tabs">
-            {PLATFORM_NAMES.map((p) => (
-              <button key={p} className={activePlatform === p ? "active" : ""} onClick={() => setActivePlatform(p)}>
-                {p === "Marketplace" ? "Facebook Marketplace" : p}
-                <span className="plat-badge">{selected.platforms[p].status}</span>
-              </button>
-            ))}
-          </div>
-          {(() => {
+          {selected.status === "Sold" ? (
+            <div className="sold-summary">
+              <h3 style={{ margin: "0 0 4px" }}>Sold</h3>
+              <p style={{ margin: "0 0 4px" }}>
+                <strong>Sold for {aud(selected.soldPrice)}</strong>
+                {selected.soldDate ? ` · ${selected.soldDate}` : ""}
+                {(() => {
+                  const soldOn = PLATFORM_NAMES.filter((p) => selected.platforms[p].status === "Sold");
+                  return soldOn.length > 0 ? ` · via ${soldOn.map((p) => (p === "Marketplace" ? "Facebook Marketplace" : p)).join(", ")}` : "";
+                })()}
+              </p>
+              <p style={{ margin: 0 }}>
+                Paid {aud(selected.cost)} · Profit {aud(realisedProfit(selected))}
+                {selected.postage || selected.fees ? ` · Postage ${aud(selected.postage)} · Fees ${aud(selected.fees)}` : " · No postage or fees"}
+              </p>
+            </div>
+          ) : (
+            <>
+            <h3>Sell it</h3>
+            <div className="plat-tabs">
+              {PLATFORM_NAMES.map((p) => (
+                <button key={p} className={activePlatform === p ? "active" : ""} onClick={() => setActivePlatform(p)}>
+                  {p === "Marketplace" ? "Facebook Marketplace" : p}
+                  <span className="plat-badge">{selected.platforms[p].status}</span>
+                </button>
+              ))}
+            </div>
+            </>
+          )}
+          {selected.status !== "Sold" && (() => {
             const p = activePlatform;
             const info = selected.platforms[p];
             const text = platformDescription(p, selected);
@@ -687,7 +740,7 @@ export default function Home() {
           </section>
           <h2>Next up</h2>
           <button className="todo-row" onClick={() => jumpToChip("needs-photo")}>
-            <span>Needs a photo</span><span className="count">{dashboard.needsPhoto}</span>
+            <span>Needs photo</span><span className="count">{dashboard.needsPhoto}</span>
           </button>
           <button className="todo-row" onClick={() => jumpToChip("to-list")}>
             <span>Ready to list</span><span className="count">{dashboard.toList}</span>
@@ -782,6 +835,7 @@ export default function Home() {
           Nice Find inventory · Goal: sell $50,000 of stock ({aud(WEEKLY_PACE)} a week).
           This app does <strong>not</strong> auto-post to eBay, Facebook Marketplace or Depop — copy the generated
           description into each platform and tick the status off here.
+          {" "}<a href="/api/logout">Lock app</a>
         </p>
       </footer>
     </main>

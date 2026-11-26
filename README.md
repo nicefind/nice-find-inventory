@@ -97,6 +97,26 @@ vercel --prod
 
 If you change the env vars later, redeploy in Vercel for them to take effect.
 
+## Passcode gate (optional, recommended)
+
+The app has a simple passcode lock. Set it in Vercel: **Settings >
+Environment Variables**, add `APP_PASSCODE` with a code you choose, then
+redeploy. After that, anyone opening the site sees a passcode screen first
+and stays unlocked on that device for 30 days. Use **Lock app** in the
+footer to lock it again on a shared device.
+
+- If `APP_PASSCODE` is not set, the site stays open as before — a deploy
+  can never lock you out by accident.
+- To change the code, change the env var in Vercel and redeploy. Changing
+  it logs everyone out, including you.
+- Do not use your Supabase password as the passcode, and do not put a real
+  code in `.env.example` or in the GitHub repo.
+
+Honest limit: this locks the app's front door only. The Supabase anon key
+is still in the client bundle, so someone who knows the Supabase project
+URL + anon key could still reach the database directly. For true per-user
+security, use Supabase Auth + RLS instead.
+
 ## 5) Add your first item
 
 1. Open your deployed site and click **+ Add item**.
