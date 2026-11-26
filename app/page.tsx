@@ -152,18 +152,49 @@ function csvCell(v: string | number): string {
   return `"${s.replace(/"/g, '""')}"`;
 }
 
+// One plain-English stage per item, instead of three platform pills.
+function stageLabel(item: Item): string {
+  if (item.status === "Sold") return "Sold";
+  if (item.status === "To photograph") return "Needs photo";
+  if (item.status === "To list") return "Ready to list";
+  if (item.status === "Listed") {
+    const n = PLATFORM_NAMES.filter((p) => item.platforms[p].status === "Listed").length;
+    return n > 0 ? `Listed on ${n} place${n === 1 ? "" : "s"}` : "Listed";
+  }
+  return "Watching";
+}
+
+function listedCount(item: Item): number {
+  return PLATFORM_NAMES.filter((p) => item.platforms[p].status === "Listed").length;
+}
+
+type Chip = "all" | "needs-photo" | "to-list" | "listed" | "sold" | "stale";
+
+const CHIPS: { id: Chip; label: string }[] = [
+  { id: "all", label: "All" },
+  { id: "needs-photo", label: "Needs photo" },
+  { id: "to-list", label: "To list" },
+  { id: "listed", label: "Listed" },
+  { id: "sold", label: "Sold" },
+  { id: "stale", label: "Stale" },
+];
+
 export default function Home() {
   const [items, setItems] = useState<Item[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
+  const [chip, setChip] = useState<Chip>("all");
   const [catFilter, setCatFilter] = useState("All");
-  const [statusFilter, setStatusFilter] = useState("All");
-  const [platformFilter, setPlatformFilter] = useState("All");
   const [sort, setSort] = useState("newest");
+  const [tab, setTab] = useState<"stock" | "overview">("stock");
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [activePlatform, setActivePlatform] = useState<PlatformName>("eBay");
   const [showForm, setShowForm] = useState(false);
   const [draft, setDraft] = useState<Item>(emptyItem());
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [showMore, setShowMore] = useState(false);
+  const [showSell, setShowSell] = useState(false);
   const [copiedKey, setCopiedKey] = useState("");
   const [uploading, setUploading] = useState(false);
 
@@ -219,22 +250,20 @@ export default function Home() {
       .reduce((s, i) => s + (i.soldPrice || 0), 0);
     const profit = sold.reduce((s, i) => s + realisedProfit(i), 0);
     const staleCount = items.filter((i) => isStale(i)).length;
-    return { totalStockCost, totalListedValue, totalSold, soldThisWeek, profit, staleCount, soldCount: sold.length };
+    const needsPhoto = items.filter((i) => i.status === "To photograph").length;
+    const toList = items.filter((i) => i.status === "To list").length;
+    return { totalStockCost, totalListedValue, totalSold, soldThisWeek, profit, staleCount, soldCount: sold.length, needsPhoto, toList };
   }, [items]);
 
   const visible = useMemo(() => {
     const q = search.trim().toLowerCase();
     let list = items.filter((i) => {
       if (catFilter !== "All" && i.category !== catFilter) return false;
-      if (statusFilter !== "All" && i.status !== statusFilter) return false;
-      if (platformFilter !== "All") {
-        if (platformFilter === "not-listed") {
-          if (PLATFORM_NAMES.some((p) => i.platforms[p].status === "Listed")) return false;
-        } else {
-          const p = platformFilter as PlatformName;
-          if (i.platforms[p].status !== "Listed") return false;
-        }
-      }
+      if (chip === "needs-photo" && i.status !== "To photograph") return false;
+      if (chip === "to-list" && i.status !== "To list") return false;
+      if (chip === "listed" && i.status !== "Listed") return false;
+      if (chip === "sold" && i.status !== "Sold") return false;
+      if (chip === "stale" && !isStale(i)) return false;
       if (q) {
         const hay = `${i.title} ${i.description} ${i.eraBrand} ${i.source} ${i.category} ${i.pickupLocation}`.toLowerCase();
         if (!hay.includes(q)) return false;
@@ -255,7 +284,7 @@ export default function Home() {
     }
     if (sort === "highest-profit") list.sort((a, b) => potentialProfit(b) - potentialProfit(a));
     return list;
-  }, [items, search, catFilter, statusFilter, platformFilter, sort]);
+  }, [items, search, catFilter, chip, sort]);
 
   async function saveItem(item: Item) {
     const supabase = getSupabase();
@@ -298,6 +327,7 @@ export default function Home() {
       }
     }
     setItems((prev) => prev.filter((i) => i.id !== id));
+    setSelectedId(null);
   }
 
   async function updatePlatform(item: Item, platform: PlatformName, patch: Partial<PlatformInfo>) {
@@ -317,6 +347,12 @@ export default function Home() {
       }
     }
     setItems((prev) => prev.map((i) => (i.id === item.id ? next : i)));
+  }
+
+  async function markAsSold(item: Item) {
+    const next: Item = { ...item, status: "Sold", soldPrice: item.soldPrice || item.askingPrice };
+    const ok = await saveItem(next);
+    if (ok) setSelectedId(item.id);
   }
 
   async function handlePhotoFiles(files: FileList | null) {
@@ -386,22 +422,60 @@ export default function Home() {
     URL.revokeObjectURL(url);
   }
 
+  function openAdd() {
+    setDraft(emptyItem());
+    setEditingId(null);
+    setShowMore(false);
+    setShowSell(false);
+    setShowForm(true);
+    setSelectedId(null);
+  }
+
+  function openEdit(item: Item) {
+    setDraft(item);
+    setEditingId(item.id);
+    // Folded sections open automatically when they already have data.
+    setShowMore(Boolean(item.eraBrand || item.condition || item.completeness || item.source || item.dateBought || item.pickupLocation || item.priceNotes || item.category !== "Other Vintage"));
+    setShowSell(Boolean(item.soldPrice || item.soldDate || item.postage || item.fees || item.status === "Sold"));
+    setShowForm(true);
+    setSelectedId(null);
+  }
+
+  function jumpToChip(c: Chip) {
+    setChip(c);
+    setTab("stock");
+    setSelectedId(null);
+    setShowForm(false);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
   const progressPct = Math.min(100, (dashboard.totalSold / GOAL) * 100);
+  const selected = selectedId ? items.find((i) => i.id === selectedId) || null : null;
 
   return (
     <main className="wrap">
       <header className="top">
         <div>
-          <h1>Nice Find — Inventory</h1>
+          <h1>nice find</h1>
           <p className="sub">Vintage collectables · Adelaide · eBay · Facebook Marketplace · Depop</p>
         </div>
-        <button className="btn primary" onClick={() => { setDraft(emptyItem()); setEditingId(null); setShowForm(true); }}>
-          + Add item
-        </button>
+        <button className="btn primary" onClick={openAdd}>+ Add item</button>
       </header>
 
+      <div className="goal-line">
+        <strong>{aud(dashboard.totalSold)} sold</strong>
+        <span>of $50,000 · {progressPct.toFixed(1)}% · {aud(GOAL - dashboard.totalSold)} to go</span>
+        <span>· pace {aud(WEEKLY_PACE)} / week</span>
+      </div>
+      <div className="progress"><div style={{ width: `${progressPct}%` }} /></div>
+
+      <div className="tabs" role="tablist" aria-label="Sections">
+        <button className={tab === "stock" && !selected ? "active" : ""} onClick={() => { setTab("stock"); setSelectedId(null); }}>Stock</button>
+        <button className={tab === "overview" ? "active" : ""} onClick={() => { setTab("overview"); setSelectedId(null); }}>Overview</button>
+      </div>
+
       {isSupabaseConfigured ? (
-        <div className="banner live">✓ Connected to Supabase — items and photos sync across devices.</div>
+        <div className="banner live">Connected to Supabase — items and photos sync across devices.</div>
       ) : (
         <div className="banner demo">
           <strong>Local demo mode — connect Supabase to sync.</strong> Items are saved in this browser only for now.
@@ -409,112 +483,15 @@ export default function Home() {
         </div>
       )}
       {error && <div className="banner error">{error}</div>}
-
-      <section className="dash" aria-label="Dashboard">
-        <div className="stat"><div className="k">Stock cost</div><div className="v">{aud(dashboard.totalStockCost)}</div><div className="s">cost of unsold stock</div></div>
-        <div className="stat"><div className="k">Listed value</div><div className="v">{aud(dashboard.totalListedValue)}</div><div className="s">asking price of listed items</div></div>
-        <div className="stat"><div className="k">Total sold</div><div className="v">{aud(dashboard.totalSold)}</div><div className="s">{dashboard.soldCount} item{dashboard.soldCount === 1 ? "" : "s"} sold</div></div>
-        <div className="stat"><div className="k">Sold this week</div><div className="v">{aud(dashboard.soldThisWeek)}</div><div className="s">pace: {aud(WEEKLY_PACE)} / week</div></div>
-        <div className="stat"><div className="k">Profit so far</div><div className="v">{aud(dashboard.profit)}</div><div className="s">sold price − cost − postage − fees</div></div>
-        <div className="stat">
-          <div className="k">Goal: $50,000</div>
-          <div className="v">{progressPct.toFixed(1)}%</div>
-          <div className="progress"><div style={{ width: `${progressPct}%` }} /></div>
-          <div className="s">{aud(GOAL - dashboard.totalSold)} to go</div>
-        </div>
-      </section>
-      {dashboard.staleCount > 0 && (
-        <div className="banner demo">⚠ {dashboard.staleCount} item{dashboard.staleCount === 1 ? " is" : "s are"} stale — listed 30+ days ago. Consider a price drop, new photos, or relisting.</div>
+      {dashboard.staleCount > 0 && tab === "overview" && (
+        <div className="banner error">{dashboard.staleCount} item{dashboard.staleCount === 1 ? " is" : "s are"} stale — listed 30+ days ago. Consider a price drop, new photos, or relisting.</div>
       )}
-
-      <div className="toolbar">
-        <div className="field">
-          <label htmlFor="search">Search</label>
-          <input id="search" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Title, brand, source…" />
-        </div>
-        <div className="field">
-          <label htmlFor="cat">Category</label>
-          <select id="cat" value={catFilter} onChange={(e) => setCatFilter(e.target.value)}>
-            <option value="All">All categories</option>
-            {CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
-          </select>
-        </div>
-        <div className="field">
-          <label htmlFor="status">Status</label>
-          <select id="status" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
-            <option value="All">All statuses</option>
-            {ITEM_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
-          </select>
-        </div>
-        <div className="field">
-          <label htmlFor="platform">Platform</label>
-          <select id="platform" value={platformFilter} onChange={(e) => setPlatformFilter(e.target.value)}>
-            <option value="All">All platforms</option>
-            <option value="eBay">Listed on eBay</option>
-            <option value="Marketplace">Listed on Marketplace</option>
-            <option value="Depop">Listed on Depop</option>
-            <option value="not-listed">Not listed anywhere</option>
-          </select>
-        </div>
-        <div className="field">
-          <label htmlFor="sort">Sort</label>
-          <select id="sort" value={sort} onChange={(e) => setSort(e.target.value)}>
-            <option value="newest">Newest first</option>
-            <option value="oldest-listed">Oldest listed first</option>
-            <option value="highest-profit">Highest profit first</option>
-          </select>
-        </div>
-        <button className="btn" onClick={exportCsv} disabled={items.length === 0}>Export CSV</button>
-      </div>
 
       {showForm && (
         <section className="form">
           <h2>{editingId ? "Edit item" : "Add item"}</h2>
-          <div className="cols">
-            <div>
-              <label>Title *</label>
-              <input value={draft.title} onChange={(e) => setDraft({ ...draft, title: e.target.value })} placeholder="e.g. Vintage ICE-BUSTERS Sno-Cone Maker" />
-              <label>Master description</label>
-              <textarea value={draft.description} onChange={(e) => setDraft({ ...draft, description: e.target.value })} placeholder="The description everything else is generated from." />
-              <label>Category</label>
-              <select value={draft.category} onChange={(e) => setDraft({ ...draft, category: e.target.value as Category })}>
-                {CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
-              </select>
-              <label>Era / brand</label>
-              <input value={draft.eraBrand} onChange={(e) => setDraft({ ...draft, eraBrand: e.target.value })} placeholder="e.g. 1985 Lanard Toys" />
-              <label>Condition</label>
-              <input value={draft.condition} onChange={(e) => setDraft({ ...draft, condition: e.target.value })} placeholder="e.g. Used (like new)" />
-              <label>Completeness notes</label>
-              <textarea value={draft.completeness} onChange={(e) => setDraft({ ...draft, completeness: e.target.value })} placeholder="Box, instructions, parts included / missing…" />
-            </div>
-            <div>
-              <label>Overall status</label>
-              <select value={draft.status} onChange={(e) => setDraft({ ...draft, status: e.target.value as ItemStatus })}>
-                {ITEM_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
-              </select>
-              <label>Cost paid (AUD)</label>
-              <input type="number" min="0" step="0.01" value={draft.cost} onChange={(e) => setDraft({ ...draft, cost: Number(e.target.value) })} />
-              <label>Asking price (AUD)</label>
-              <input type="number" min="0" step="0.01" value={draft.askingPrice} onChange={(e) => setDraft({ ...draft, askingPrice: e.target.value === "" ? 0 : Number(e.target.value) })} />
-              <label>Sold price (AUD)</label>
-              <input type="number" min="0" step="0.01" value={draft.soldPrice} onChange={(e) => setDraft({ ...draft, soldPrice: Number(e.target.value) })} />
-              <label>Postage (AUD)</label>
-              <input type="number" min="0" step="0.01" value={draft.postage} onChange={(e) => setDraft({ ...draft, postage: Number(e.target.value) })} />
-              <label>Fees (AUD)</label>
-              <input type="number" min="0" step="0.01" value={draft.fees} onChange={(e) => setDraft({ ...draft, fees: Number(e.target.value) })} />
-              <label>Source</label>
-              <input value={draft.source} onChange={(e) => setDraft({ ...draft, source: e.target.value })} placeholder="e.g. Facebook Marketplace" />
-              <label>Date bought</label>
-              <input type="date" value={draft.dateBought} onChange={(e) => setDraft({ ...draft, dateBought: e.target.value })} />
-              <label>Pickup location</label>
-              <input value={draft.pickupLocation} onChange={(e) => setDraft({ ...draft, pickupLocation: e.target.value })} placeholder="e.g. Modbury Heights, Adelaide" />
-              <label>Sold date</label>
-              <input type="date" value={draft.soldDate} onChange={(e) => setDraft({ ...draft, soldDate: e.target.value })} />
-              <label>Price / comp notes</label>
-              <textarea value={draft.priceNotes} onChange={(e) => setDraft({ ...draft, priceNotes: e.target.value })} placeholder="Sold comps, resale estimates, what to check…" />
-            </div>
-          </div>
-
+          <label>Title *</label>
+          <input value={draft.title} onChange={(e) => setDraft({ ...draft, title: e.target.value })} placeholder="e.g. Vintage ICE-BUSTERS Sno-Cone Maker" />
           <label>Photos</label>
           <input type="file" accept="image/*" multiple onChange={(e) => handlePhotoFiles(e.target.files)} />
           {uploading && <p>Uploading photos…</p>}
@@ -529,27 +506,86 @@ export default function Home() {
               ))}
             </div>
           )}
-
-          <h3>Platform listings</h3>
-          {PLATFORM_NAMES.map((p) => (
-            <div className="platform" key={p}>
-              <h4>{p === "Marketplace" ? "Facebook Marketplace" : p}</h4>
-              <div className="fields">
-                <div>
-                  <label>Status</label>
-                  <select value={draft.platforms[p].status} onChange={(e) => setDraft({ ...draft, platforms: { ...draft.platforms, [p]: { ...draft.platforms[p], status: e.target.value as PlatformStatus } } })}>
-                    {PLATFORM_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
-                  </select>
-                </div>
-                <div>
-                  <label>Listed date</label>
-                  <input type="date" value={draft.platforms[p].listedDate} onChange={(e) => setDraft({ ...draft, platforms: { ...draft.platforms, [p]: { ...draft.platforms[p], listedDate: e.target.value } } })} />
-                </div>
-              </div>
-              <label>Listing URL</label>
-              <input value={draft.platforms[p].url} onChange={(e) => setDraft({ ...draft, platforms: { ...draft.platforms, [p]: { ...draft.platforms[p], url: e.target.value } } })} placeholder="https://…" />
+          <div className="cols">
+            <div>
+              <label>Paid (AUD)</label>
+              <input type="number" min="0" step="0.01" value={draft.cost} onChange={(e) => setDraft({ ...draft, cost: Number(e.target.value) })} />
             </div>
-          ))}
+            <div>
+              <label>Asking price (AUD)</label>
+              <input type="number" min="0" step="0.01" value={draft.askingPrice} onChange={(e) => setDraft({ ...draft, askingPrice: e.target.value === "" ? 0 : Number(e.target.value) })} />
+            </div>
+          </div>
+          <label>Description</label>
+          <textarea value={draft.description} onChange={(e) => setDraft({ ...draft, description: e.target.value })} placeholder="The description everything else is generated from." />
+
+          <details open={showMore} onToggle={(e) => setShowMore((e.target as HTMLDetailsElement).open)}>
+            <summary>More details</summary>
+            <label>Category</label>
+            <select value={draft.category} onChange={(e) => setDraft({ ...draft, category: e.target.value as Category })}>
+              {CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
+            <label>Era / brand</label>
+            <input value={draft.eraBrand} onChange={(e) => setDraft({ ...draft, eraBrand: e.target.value })} placeholder="e.g. 1985 Lanard Toys" />
+            <label>Condition</label>
+            <input value={draft.condition} onChange={(e) => setDraft({ ...draft, condition: e.target.value })} placeholder="e.g. Used (like new)" />
+            <label>Completeness notes</label>
+            <textarea value={draft.completeness} onChange={(e) => setDraft({ ...draft, completeness: e.target.value })} placeholder="Box, instructions, parts included / missing…" />
+            <label>Source</label>
+            <input value={draft.source} onChange={(e) => setDraft({ ...draft, source: e.target.value })} placeholder="e.g. Facebook Marketplace" />
+            <label>Date bought</label>
+            <input type="date" value={draft.dateBought} onChange={(e) => setDraft({ ...draft, dateBought: e.target.value })} />
+            <label>Pickup location</label>
+            <input value={draft.pickupLocation} onChange={(e) => setDraft({ ...draft, pickupLocation: e.target.value })} placeholder="e.g. Modbury Heights, Adelaide" />
+            <label>Price / comp notes</label>
+            <textarea value={draft.priceNotes} onChange={(e) => setDraft({ ...draft, priceNotes: e.target.value })} placeholder="Sold comps, resale estimates, what to check…" />
+            <h3>Platform listings</h3>
+            {PLATFORM_NAMES.map((p) => (
+              <div className="platform" key={p}>
+                <h4>{p === "Marketplace" ? "Facebook Marketplace" : p}</h4>
+                <div className="fields">
+                  <div>
+                    <label>Status</label>
+                    <select value={draft.platforms[p].status} onChange={(e) => setDraft({ ...draft, platforms: { ...draft.platforms, [p]: { ...draft.platforms[p], status: e.target.value as PlatformStatus } } })}>
+                      {PLATFORM_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label>Listed date</label>
+                    <input type="date" value={draft.platforms[p].listedDate} onChange={(e) => setDraft({ ...draft, platforms: { ...draft.platforms, [p]: { ...draft.platforms[p], listedDate: e.target.value } } })} />
+                  </div>
+                </div>
+                <label>Listing URL</label>
+                <input value={draft.platforms[p].url} onChange={(e) => setDraft({ ...draft, platforms: { ...draft.platforms, [p]: { ...draft.platforms[p], url: e.target.value } } })} placeholder="https://…" />
+              </div>
+            ))}
+          </details>
+
+          <details open={showSell} onToggle={(e) => setShowSell((e.target as HTMLDetailsElement).open)}>
+            <summary>When it sells</summary>
+            <label>Overall status</label>
+            <select value={draft.status} onChange={(e) => setDraft({ ...draft, status: e.target.value as ItemStatus })}>
+              {ITEM_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
+            </select>
+            <div className="cols">
+              <div>
+                <label>Sold price (AUD)</label>
+                <input type="number" min="0" step="0.01" value={draft.soldPrice} onChange={(e) => setDraft({ ...draft, soldPrice: Number(e.target.value) })} />
+              </div>
+              <div>
+                <label>Sold date</label>
+                <input type="date" value={draft.soldDate} onChange={(e) => setDraft({ ...draft, soldDate: e.target.value })} />
+              </div>
+              <div>
+                <label>Postage (AUD)</label>
+                <input type="number" min="0" step="0.01" value={draft.postage} onChange={(e) => setDraft({ ...draft, postage: Number(e.target.value) })} />
+              </div>
+              <div>
+                <label>Fees (AUD)</label>
+                <input type="number" min="0" step="0.01" value={draft.fees} onChange={(e) => setDraft({ ...draft, fees: Number(e.target.value) })} />
+              </div>
+            </div>
+          </details>
 
           <div className="row" style={{ marginTop: 16 }}>
             <button className="btn primary" onClick={handleSaveForm}>{editingId ? "Save changes" : "Add item"}</button>
@@ -558,102 +594,188 @@ export default function Home() {
         </section>
       )}
 
-      {!loaded && <p>Loading…</p>}
-
-      {loaded && items.length === 0 && !showForm && (
-        <div className="empty">
-          <h2>Your inventory is empty</h2>
-          <p>Add your first item, or load the two sample finds so you can see the layout.</p>
-          <div className="row" style={{ justifyContent: "center" }}>
-            <button className="btn primary" onClick={() => { setDraft(emptyItem()); setEditingId(null); setShowForm(true); }}>+ Add first item</button>
-            <button className="btn" onClick={loadSamples}>Load 2 sample items</button>
+      {selected ? (
+        <section>
+          <button className="btn small" onClick={() => setSelectedId(null)}>← Back to stock</button>
+          {selected.photos.length > 0 && (
+            <div className="photos" style={{ marginTop: 12 }}>
+              {selected.photos.map((p, i) => (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img key={i} src={p} alt={`${selected.title} photo ${i + 1}`} className={i === 0 ? "hero" : ""} />
+              ))}
+            </div>
+          )}
+          <div style={{ marginTop: 12 }}>
+            <span className={`pill${selected.status === "Sold" ? " sold" : ""}`}>{stageLabel(selected)}</span>
+            <span className="pill">{selected.category}</span>
+            {selected.isSample && <span className="pill sample">Sample</span>}
+            {isStale(selected) && <span className="pill stale">Stale — listed {daysListed(selected)} days</span>}
           </div>
-          <p style={{ fontSize: 13 }}>Samples: Ice-Busters sno-cone maker ($20) and 5 vintage Coca-Cola Yo Yos ($25). Clearly marked as samples, and deletable.</p>
-        </div>
-      )}
+          <h2>{selected.title}</h2>
+          <p className="price-line">Paid {aud(selected.cost)} · Asking {aud(selected.askingPrice)}{selected.status === "Sold" ? ` · Sold ${aud(selected.soldPrice)}` : ""}</p>
+          {selected.description && <p className="desc">{selected.description}</p>}
+          <p className="meta">
+            {[selected.eraBrand, selected.condition, selected.source, selected.pickupLocation, selected.dateBought ? `Bought ${selected.dateBought}` : ""].filter(Boolean).join(" · ")}
+          </p>
+          {selected.completeness && <p className="meta">Completeness: {selected.completeness}</p>}
+          {selected.priceNotes && <p className="meta">Notes: {selected.priceNotes}</p>}
 
-      {loaded && visible.length === 0 && items.length > 0 && (
-        <div className="empty"><p>No items match those filters. Try clearing the search or filters.</p></div>
-      )}
-
-      <div className="grid">
-        {visible.map((item) => {
-          const stale = isStale(item);
-          const listedDays = daysListed(item);
-          return (
-            <article className="card" key={item.id}>
-              {item.photos.length > 0 && (
-                <div className="photos">
-                  {item.photos.map((p, i) => (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img key={i} src={p} alt={`${item.title} photo ${i + 1}`} />
-                  ))}
+          <h3>Sell it</h3>
+          <div className="plat-tabs">
+            {PLATFORM_NAMES.map((p) => (
+              <button key={p} className={activePlatform === p ? "active" : ""} onClick={() => setActivePlatform(p)}>
+                {p === "Marketplace" ? "Facebook Marketplace" : p}
+                <span className="plat-badge">{selected.platforms[p].status}</span>
+              </button>
+            ))}
+          </div>
+          {(() => {
+            const p = activePlatform;
+            const info = selected.platforms[p];
+            const text = platformDescription(p, selected);
+            const key = `${selected.id}-${p}`;
+            return (
+              <div className="platform">
+                <p className="hint">{platformHint(p)}</p>
+                <div className="fields">
+                  <div>
+                    <label>Status</label>
+                    <select value={info.status} onChange={(e) => updatePlatform(selected, p, { status: e.target.value as PlatformStatus })}>
+                      {PLATFORM_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label>Listed date</label>
+                    <input type="date" value={info.listedDate} onChange={(e) => updatePlatform(selected, p, { listedDate: e.target.value })} />
+                  </div>
                 </div>
-              )}
-              <div>
-                <span className="pill">{item.status}</span>
-                <span className="pill">{item.category}</span>
-                {item.isSample && <span className="pill sample">Sample</span>}
-                {stale && <span className="pill stale">Stale — listed {listedDays} days</span>}
+                <label>Listing URL</label>
+                <input value={info.url} onChange={(e) => updatePlatform(selected, p, { url: e.target.value })} placeholder="https://…" />
+                <pre>{text}</pre>
+                <div className="row">
+                  <button className="btn small" onClick={() => copyText(key, text)}>
+                    {copiedKey === key ? "✓ Copied" : `Copy ${p} description`}
+                  </button>
+                  {info.url && <a href={info.url} target="_blank" rel="noreferrer">Open listing ↗</a>}
+                </div>
               </div>
-              <h3>{item.title}</h3>
-              {item.description && <p className="desc">{item.description}</p>}
-              <p className="meta">
-                {[item.eraBrand, item.condition, item.source, item.pickupLocation, item.dateBought ? `Bought ${item.dateBought}` : ""].filter(Boolean).join(" · ")}
-              </p>
-              {item.completeness && <p className="meta">Completeness: {item.completeness}</p>}
-              {item.priceNotes && <p className="meta">Notes: {item.priceNotes}</p>}
-              <div className="money">
-                <span>Cost <b>{aud(item.cost)}</b></span>
-                <span>Asking <b>{aud(item.askingPrice)}</b></span>
-                <span>Sold <b>{aud(item.soldPrice)}</b></span>
-                <span>{item.status === "Sold" ? "Profit" : "Potential profit"} <b>{aud(item.status === "Sold" ? realisedProfit(item) : potentialProfit(item))}</b></span>
-              </div>
+            );
+          })()}
 
-              {PLATFORM_NAMES.map((p) => {
-                const info = item.platforms[p];
-                const text = platformDescription(p, item);
-                const key = `${item.id}-${p}`;
-                return (
-                  <details className="platform" key={p}>
-                    <summary>
-                      <strong>{p === "Marketplace" ? "Facebook Marketplace" : p}</strong> — {info.status}
-                      {info.listedDate ? ` · listed ${info.listedDate}` : ""}
-                    </summary>
-                    <p className="hint">{platformHint(p)}</p>
-                    <div className="fields">
-                      <div>
-                        <label>Status</label>
-                        <select value={info.status} onChange={(e) => updatePlatform(item, p, { status: e.target.value as PlatformStatus })}>
-                          {PLATFORM_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
-                        </select>
-                      </div>
-                      <div>
-                        <label>Listed date</label>
-                        <input type="date" value={info.listedDate} onChange={(e) => updatePlatform(item, p, { listedDate: e.target.value })} />
-                      </div>
-                    </div>
-                    <label>Listing URL</label>
-                    <input value={info.url} onChange={(e) => updatePlatform(item, p, { url: e.target.value })} placeholder="https://…" />
-                    <pre>{text}</pre>
-                    <div className="row">
-                      <button className="btn small" onClick={() => copyText(key, text)}>
-                        {copiedKey === key ? "✓ Copied" : `Copy ${p} description`}
-                      </button>
-                      {info.url && <a href={info.url} target="_blank" rel="noreferrer">Open listing ↗</a>}
-                    </div>
-                  </details>
-                );
-              })}
+          <div className="sticky-bar">
+            <button className="btn" onClick={() => openEdit(selected)}>Edit</button>
+            {selected.status !== "Sold" && (
+              <button className="btn sold-btn" onClick={() => markAsSold(selected)}>Mark as sold</button>
+            )}
+            <button className="btn danger" onClick={() => handleDelete(selected.id, selected.title)}>Delete</button>
+          </div>
+        </section>
+      ) : tab === "overview" ? (
+        <section>
+          <section className="dash" aria-label="Dashboard">
+            <div className="stat"><div className="k">Stock cost</div><div className="v">{aud(dashboard.totalStockCost)}</div><div className="s">cost of unsold stock</div></div>
+            <div className="stat"><div className="k">Listed value</div><div className="v">{aud(dashboard.totalListedValue)}</div><div className="s">asking price of listed items</div></div>
+            <div className="stat"><div className="k">Total sold</div><div className="v">{aud(dashboard.totalSold)}</div><div className="s">{dashboard.soldCount} item{dashboard.soldCount === 1 ? "" : "s"} sold</div></div>
+            <div className="stat"><div className="k">Sold this week</div><div className="v">{aud(dashboard.soldThisWeek)}</div><div className="s">pace: {aud(WEEKLY_PACE)} / week</div></div>
+            <div className="stat"><div className="k">Profit so far</div><div className="v">{aud(dashboard.profit)}</div><div className="s">sold price − cost − postage − fees</div></div>
+            <div className="stat">
+              <div className="k">Goal: $50,000</div>
+              <div className="v">{progressPct.toFixed(1)}%</div>
+              <div className="progress"><div style={{ width: `${progressPct}%` }} /></div>
+              <div className="s">{aud(GOAL - dashboard.totalSold)} to go</div>
+            </div>
+          </section>
+          <h2>Next up</h2>
+          <button className="todo-row" onClick={() => jumpToChip("needs-photo")}>
+            <span>Needs a photo</span><span className="count">{dashboard.needsPhoto}</span>
+          </button>
+          <button className="todo-row" onClick={() => jumpToChip("to-list")}>
+            <span>Ready to list</span><span className="count">{dashboard.toList}</span>
+          </button>
+          <button className="todo-row" onClick={() => jumpToChip("stale")}>
+            <span>Stale — listed 30+ days</span><span className="count">{dashboard.staleCount}</span>
+          </button>
+          <div className="row" style={{ marginTop: 16 }}>
+            <button className="btn" onClick={exportCsv} disabled={items.length === 0}>Export CSV</button>
+          </div>
+        </section>
+      ) : (
+        <section>
+          <div className="search">
+            <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search your stock…" aria-label="Search stock" />
+          </div>
+          <div className="chips">
+            {CHIPS.map((c) => (
+              <button key={c.id} className={`chip${chip === c.id ? " active" : ""}`} onClick={() => setChip(c.id)}>
+                {c.label}{c.id === "needs-photo" && dashboard.needsPhoto > 0 ? ` (${dashboard.needsPhoto})` : ""}{c.id === "to-list" && dashboard.toList > 0 ? ` (${dashboard.toList})` : ""}{c.id === "stale" && dashboard.staleCount > 0 ? ` (${dashboard.staleCount})` : ""}
+              </button>
+            ))}
+          </div>
+          <div className="toolbar-mini">
+            <label htmlFor="cat" style={{ margin: 0 }}>Category</label>
+            <select id="cat" value={catFilter} onChange={(e) => setCatFilter(e.target.value)}>
+              <option value="All">All</option>
+              {CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
+            <label htmlFor="sort" style={{ margin: 0 }}>Sort</label>
+            <select id="sort" value={sort} onChange={(e) => setSort(e.target.value)}>
+              <option value="newest">Newest first</option>
+              <option value="oldest-listed">Oldest listed first</option>
+              <option value="highest-profit">Highest profit first</option>
+            </select>
+            <span>{visible.length} item{visible.length === 1 ? "" : "s"}</span>
+          </div>
 
-              <div className="row">
-                <button className="btn small" onClick={() => { setDraft(item); setEditingId(item.id); setShowForm(true); window.scrollTo({ top: 0, behavior: "smooth" }); }}>Edit</button>
-                <button className="btn small danger" onClick={() => handleDelete(item.id, item.title)}>Delete</button>
+          {!loaded && <p>Loading…</p>}
+
+          {loaded && items.length === 0 && !showForm && (
+            <div className="empty">
+              <h2>Your inventory is empty</h2>
+              <p>Add your first item, or load the two sample finds so you can see the layout.</p>
+              <div className="row" style={{ justifyContent: "center" }}>
+                <button className="btn primary" onClick={openAdd}>+ Add first item</button>
+                <button className="btn" onClick={loadSamples}>Load 2 sample items</button>
               </div>
-            </article>
-          );
-        })}
-      </div>
+              <p style={{ fontSize: 13 }}>Samples: Ice-Busters sno-cone maker ($20) and 5 vintage Coca-Cola Yo Yos ($25). Clearly marked as samples, and deletable.</p>
+            </div>
+          )}
+
+          {loaded && visible.length === 0 && items.length > 0 && (
+            <div className="empty"><p>No items match those filters. Try clearing the search or filters.</p></div>
+          )}
+
+          <div className="grid">
+            {visible.map((item) => {
+              const stale = isStale(item);
+              const listedDays = daysListed(item);
+              return (
+                <article className="card" key={item.id} onClick={() => { setSelectedId(item.id); setActivePlatform("eBay"); window.scrollTo({ top: 0, behavior: "smooth" }); }}>
+                  {item.photos.length > 0 && (
+                    <div className="photos">
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img src={item.photos[0]} alt={item.title} className="hero" />
+                    </div>
+                  )}
+                  <div>
+                    <span className={`pill${item.status === "Sold" ? " sold" : ""}`}>{stageLabel(item)}</span>
+                    {item.isSample && <span className="pill sample">Sample</span>}
+                    {stale && <span className="pill stale">Stale — listed {listedDays} days</span>}
+                  </div>
+                  <h3>{item.title}</h3>
+                  <p className="price-line">Paid {aud(item.cost)} · Asking {aud(item.askingPrice)}</p>
+                  {item.description && <p className="desc">{item.description}</p>}
+                  <p className="meta">
+                    {[item.eraBrand, item.condition, item.category].filter(Boolean).join(" · ")}
+                  </p>
+                </article>
+              );
+            })}
+          </div>
+          {loaded && items.length > 0 && (
+            <button className="btn primary add-sticky" onClick={openAdd}>+ Add item</button>
+          )}
+        </section>
+      )}
 
       <footer>
         <p>
